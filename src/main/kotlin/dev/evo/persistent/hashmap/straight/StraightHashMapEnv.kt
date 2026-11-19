@@ -4,6 +4,8 @@ import java.nio.file.Path
 import java.nio.file.Paths
 import java.util.concurrent.locks.ReentrantLock
 
+import kotlin.concurrent.withLock
+
 import kotlin.random.Random
 
 import dev.evo.io.IOBuffer
@@ -83,14 +85,12 @@ class StraightHashMapROEnv<H: Hasher, W: StraightHashMap, RO: StraightHashMapRO>
     fun getCurrentMap(): RO {
         while (true) {
             // If `currentFile` is there we do not need the lock
-            var curFile = currentFile ?: lock.lock().let {
-                // Another thread could update the current file so check it again
-                currentFile ?: try {
-                    openFile(dir).also { file ->
-                        currentFile = file
-                    }
-                } finally {
-                    lock.unlock()
+            var curFile = currentFile ?: lock.withLock {
+                // Another thread could update the current file so check it again.
+                // The lock must be released on this path too: the threads that waited
+                // for the lock while another one was opening the file see it here
+                currentFile ?: openFile(dir).also { file ->
+                    currentFile = file
                 }
             }
 
