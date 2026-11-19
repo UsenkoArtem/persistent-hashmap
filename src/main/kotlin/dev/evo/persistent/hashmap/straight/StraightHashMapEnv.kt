@@ -83,10 +83,11 @@ class StraightHashMapROEnv<H: Hasher, W: StraightHashMap, RO: StraightHashMapRO>
     fun getCurrentMap(): RO {
         while (true) {
             // If `currentFile` is there we do not need the lock
-            var curFile = currentFile ?: lock.lock().let {
-                // Another thread could update the current file so check it again
-                currentFile ?: try {
-                    openFile(dir).also { file ->
+            var curFile = currentFile ?: run {
+                lock.lock()
+                try {
+                    // Another thread could update the current file so check it again
+                    currentFile ?: openFile(dir).also { file ->
                         currentFile = file
                     }
                 } finally {

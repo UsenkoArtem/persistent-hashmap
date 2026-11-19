@@ -9,6 +9,10 @@ import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.shouldBe
 
+import java.util.concurrent.CyclicBarrier
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+
 class StraightHashMapEnvTests : FunSpec() {
     init {
         test("env: single writer, multiple readers") {
@@ -162,6 +166,53 @@ class StraightHashMapEnvTests : FunSpec() {
                                             mapV0.close()
                                             mapV1.close()
                                         }
+                            }
+                        }
+            }
+        }
+
+        test("env: concurrent first getCurrentMap calls must not leave the lock held") {
+            // When several threads call `getCurrentMap` on a fresh read-only env at the same time,
+            // all of them can observe `currentFile == null` and take the lock.
+            // Every one of them must release it, otherwise no other thread will be able
+            // to switch the env to a newer map version.
+            val numThreads = 8
+            val iterations = 50
+
+            withTempDir { tmpDir ->
+                StraightHashMapEnv.Builder(StraightHashMapType_Int_Float)
+                        .open(tmpDir)
+                        .use { env ->
+                            val executor = Executors.newFixedThreadPool(numThreads)
+                            try {
+                                repeat(iterations) { iteration ->
+                                    StraightHashMapEnv.Builder(StraightHashMapType_Int_Float)
+                                            .openReadOnly(tmpDir)
+                                            .use { roEnv ->
+                                                val barrier = CyclicBarrier(numThreads)
+                                                val futures = (1..numThreads).map {
+                                                    executor.submit<Long> {
+                                                        barrier.await()
+                                                        roEnv.getCurrentMap().use { it.version }
+                                                    }
+                                                }
+                                                val version = iteration.toLong()
+                                                futures.forEach { it.get(10, TimeUnit.SECONDS) shouldBe version }
+
+                                                env.openMap().use { map ->
+                                                    env.copyMap(map).use { newMap ->
+                                                        env.commit(newMap)
+                                                    }
+                                                }
+
+                                                // The calling thread must be able to pick up the new version
+                                                roEnv.getCurrentMap().use { roMap ->
+                                                    roMap.version shouldBe version + 1
+                                                }
+                                            }
+                                }
+                            } finally {
+                                executor.shutdownNow()
                             }
                         }
             }
